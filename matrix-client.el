@@ -122,6 +122,13 @@ user can recover it from the kill ring instead of retyping it."
 
 ;;;; Connect / disconnect
 
+(defun matrix-client-last-sync-age (session)
+  (require 'ts)
+  (let ((last-sync-ts (make-ts :unix (oref session last-sync-started-time))))
+    (ts-difference (ts-now) last-sync-ts)))
+
+(defvar matrix-client-watchdog-timer nil)
+
 ;;;###autoload
 (defun matrix-client-connect (&optional user password access-token server)
   "Connect to the Matrix.
@@ -168,6 +175,17 @@ connecting, non-nil."
   "Callback for successful login.
 Add session to sessions list and run initial sync."
   (push session matrix-client-sessions)
+
+  (setq matrix-client-watchdog-timer
+        (run-at-time nil 60
+                     (lambda ()
+                       (let ((age (matrix-client-last-sync-age session)))
+                         (when (> age 40)
+                           (display-warning 'matrix-client-sync-timer
+                                            (format "Last sync started %s seconds ago (%s outstanding syncs)"
+                                                    age (length (oref session pending-syncs)))))))))
+
+
   (matrix-sync session)
   (when matrix-client-save-token
     (matrix-client-save-token session))
@@ -221,6 +239,8 @@ tokens (username and password will be required again)."
         ;; FIXME: This does not work for multiple sessions.
         (t (matrix-client-save-token (car matrix-client-sessions))))
   (--each matrix-client-sessions
+    (cancel-timer matrix-client-watchdog-timer)
+    (setq matrix-client-watchdog-timer nil)
     ;; Kill pending sync response buffer processes
     (with-slots (pending-syncs disconnect) it
       (setq disconnect t)

@@ -197,6 +197,8 @@ The sync error handler should increase this for consecutive errors, up to a maxi
                   :type list
                   :initform nil
                   :documentation "List of response buffers for pending /sync requests.  This should generally be a list of zero or one buffers.  This is used to cancel pending /sync requests when the user disconnects.")
+   (last-sync-started-time :type number
+                           :documentation "Timestamp of the last sync request sent.  Used to determine whether a sync's network process is stuck.")
    (client-data :initarg :client-data
                 :documentation "Reserved for users of the library, who may store whatever they want here.")
    (login-attempts :initarg :login-attempts
@@ -608,7 +610,7 @@ requests, and we make a new request."
   ;; beginning of the room, in which case I guess the start/end tokens from /messages will be
   ;; the same...?  Or we'll receive fewer messages than the limit...?
 
-  (with-slots (access-token next-batch pending-syncs disconnect) session
+  (with-slots (access-token next-batch pending-syncs disconnect last-sync-started-time) session
     (matrix-log (a-list 'event 'matrix-sync
                         'next-batch next-batch
                         'timeout timeout))
@@ -620,6 +622,8 @@ requests, and we make a new request."
       ('nil (unless access-token
               ;; This should never happen.
               (error "Missing access token for session"))
+            (when (> (length pending-syncs) 0)
+              (display-warning 'matrix-client-sync (format "Pending syncs before starting new sync: %s" (length pending-syncs))))
             (when-let ((response-buffer (matrix-get session 'sync
                                           :data (a-list 'since next-batch
                                                         'full_state full-state
@@ -634,7 +638,8 @@ requests, and we make a new request."
                                           :timeout (+ timeout 5)
                                           ;; Don't prompt the user if Emacs is exited while a /sync is waiting
                                           :query-on-exit nil)))
-              (push response-buffer pending-syncs))))))
+              (push response-buffer pending-syncs)
+              (setq last-sync-started-time (float-time)))))))
 
 (matrix-defcallback sync matrix-session
   "Callback function for successful sync request."
@@ -655,7 +660,22 @@ requests, and we make a new request."
           (setq initial-sync-p nil
                 next-batch (a-get data 'next_batch)
                 sync-retry-delay 0)
+          ;; DEBUGGING
+          ;; (display-warning 'matrix-sync-callback (format "Pending syncs before deleting completed sync buffer: %s"
+          ;;                                                (length pending-syncs)))
+          (when (> 1 (length pending-syncs))
+            (display-warning 'matrix-sync-callback "Deleting pending sync process buffers...")
+            (dolist (buffer pending-syncs)
+              (display-warning 'matrix-sync-callback (format "Deleting pending sync process buffer: %s" buffer))
+              (delete-process buffer))
+            (display-warning 'matrix-sync-callback (format "Remaining pending sync buffers: %s" (length pending-syncs))))
+          ;; NOT DEBUGGING
           (setq pending-syncs (delete (current-buffer) pending-syncs))
+          ;; DEBUGGING
+          (when (> 0 (length pending-syncs))
+            (display-warning 'matrix-sync-callback (format "Pending syncs after deleting completed sync buffer: %s"
+                                                           (length pending-syncs))))
+          ;; NOT DEBUGGING
           (matrix-log "Sync callback complete.  Calling sync again...")
           (run-hook-with-args 'matrix-after-sync-hook session)
           (matrix-sync session)))
